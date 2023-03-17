@@ -1,0 +1,127 @@
+
+booking_single_line: "
+SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
+DECLARE @TargetDate AS VARCHAR(max);
+SET @TargetDate = '%{yesterday}';
+
+
+SELECT pb.RecordID                                                              'Booking ID',
+       pb.ContractNumber                                                        'Booking Ref',
+       FORMAT(pb.BookingDate, 'dd-MM-yyyy')                                     'Booking Date',
+       pb.HireDispatchDate,
+       pb.HireStartDateTime,
+       pb.HireEndDateTime,
+       pb.StatusID,
+       --FORMAT(pb.HireEndDateTime, 'dd-MM-yyyy')                               'Job End Date',
+       cs.Name                                                                  'Depot',
+       pb.CustomerID                                                            'Customer ID',
+       pb.SiteAddress                                                           'Site Address',
+       TRIM(REPLACE([dbo].[DATAMODEL_GetAddressLine]
+                        (REPLACE(pb.SiteAddress, ', ', CHAR(10)), 6), ' ', '')) 'Postcode',
+       pbioh.PlantOperatorID                                                    'Driver ID',
+       pbioh.Hours                                                             ,
+       pbior.MinimumChargeHours                                                 'Min Hours',
+       pbior.Rate                                                               ,
+       pbior.MinimumCharge                                                      'Min Charge',
+       CASE
+           When pb.ChargeOutLastInvoiceDate is not null then 'Yes'
+           Else 'No'
+       End AS IsInvoiced,
+       pb.ChargeOutLastInvoiceDate as InvoiceDate,
+       CASE
+           WHEN pbior.Rate < pbior.MinimumCharge THEN pbior.MinimumCharge
+           ELSE
+                   (CASE
+                        WHEN pbioh.Hours < pbior.MinimumChargeHours THEN pbior.MinimumChargeHours
+                        ELSE pbioh.Hours END) *
+                   pbior.Rate END                                               'Net',
+       CASE
+           WHEN pbioh.LabourBandID = 1 THEN 'Labour'
+           WHEN pbioh.LabourBandID = 2 THEN 'Overtime'
+           WHEN pbioh.LabourBandID = 3 THEN 'Saturday Rate'
+           WHEN pbioh.LabourBandID = 4 THEN 'Travel Time'
+           ELSE 'ERROR' END                                                     'Item',
+       CASE
+           WHEN pbior.MinimumCharge > 0 THEN 'Yes'
+           ELSE 'No' END                                                        'Site Visit'
+FROM dbo.PlantBookingItemOperatorHours pbioh
+         LEFT OUTER JOIN dbo.PlantBookingItemOperatedRate pbior
+                         ON pbioh.PlantBookingItemID = pbior.PlantBookingItemID AND
+                            pbior.LabourBandID = pbioh.LabourBandID
+         LEFT OUTER JOIN dbo.PlantBookingItem pbi ON pbioh.PlantBookingItemID = pbi.RecordID
+         LEFT OUTER JOIN dbo.PlantBooking pb ON pbi.PlantBookingID = pb.RecordID
+         LEFT OUTER JOIN dbo.PlantDepot pd ON pb.PlantDepotID = pd.RecordID
+         LEFT OUTER JOIN dbo.Suppliers s ON pd.SupplierID = s.RecordID
+         LEFT OUTER JOIN dbo.CompanyStructure cs ON s.OrganisationStructureID = cs.RecordID
+WHERE pb.StatusID IN (2, 3, 4, 6, 7)
+  AND FORMAT(pb.HireStartDateTime, 'dd-MM-yyyy')  like '%{yesterday}'
+  AND (pbior.EffectiveToDate IS NULL OR pbior.EffectiveToDate > pb.HireStartDateTime)
+  AND pbioh.PlantOperatorID != 0
+  AND pbioh.RecordID IN
+      (SELECT MAX(pbioh.RecordID) 'BookingHours ID'
+       FROM dbo.PlantBookingItemOperatorHours pbioh
+                LEFT OUTER JOIN dbo.PlantBookingItem pbi ON pbioh.PlantBookingItemID = pbi.RecordID
+                LEFT OUTER JOIN dbo.PlantBooking pb ON pbi.PlantBookingID = pb.RecordID
+                LEFT OUTER JOIN (SELECT pb.RecordID,
+                                        SUM(pbioh.hours) 'TotalHours'
+                                 FROM dbo.PlantBookingItemOperatorHours pbioh
+                                          LEFT OUTER JOIN dbo.PlantBookingItem pbi ON pbioh.PlantBookingItemID = pbi.RecordID
+                                          LEFT OUTER JOIN dbo.PlantBooking pb ON pbi.PlantBookingID = pb.RecordID
+                                 WHERE pbioh.PlantOperatorID != 0
+                                   AND pb.StatusID IN (2, 3, 4, 6, 7)
+                                 GROUP BY pb.RecordID) v2 ON pb.RecordID = v2.RecordID
+       WHERE pb.StatusID IN (2, 3, 4, 6, 7)
+         AND pbioh.PlantOperatorID != 0
+         AND ((pbioh.Hours > 0 AND v2.TotalHours > 0) OR (pbioh.Hours = 0 AND v2.TotalHours = 0))
+       GROUP BY pb.RecordID, pbioh.LabourBandID)
+
+
+  AND CASE
+          WHEN pbior.Rate < pbior.MinimumCharge THEN pbior.MinimumCharge
+          ELSE
+                  (CASE
+                       WHEN pbioh.Hours < pbior.MinimumChargeHours
+                           THEN pbior.MinimumChargeHours
+                       ELSE pbioh.Hours END) *
+                  pbior.Rate END > 0
+
+
+UNION
+
+
+SELECT pb.RecordID                                                                  'Booking ID',
+       pb.ContractNumber                                                            'Booking Ref',
+       FORMAT(pb.BookingDate, 'dd-MM-yyyy')                               'Booking Date',
+       pb.HireDispatchDate,
+       pb.HireStartDateTime,
+       pb.HireEndDateTime,
+       pb.StatusID,
+       cs.Name                                                                      'Depot',
+       pb.CustomerID                                                                'Customer ID',
+       pb.SiteAddress                                                               'Site Address',
+       [dbo].[DATAMODEL_GetAddressLine](REPLACE(pb.SiteAddress, ', ', CHAR(10)), 6) 'Postcode',
+       NULL                                                                         'Driver ID',
+       NULL                                                                         'Hours',
+       NULL                                                                         'Min Hours',
+       NULL                                                                         'Rate',
+       NULL                                                                         'Min Charge',
+       CASE
+           When pb.ChargeOutLastInvoiceDate is not null then 'Yes'
+           Else 'No'
+       End AS IsInvoiced,
+       pb.ChargeOutLastInvoiceDate as InvoiceDate,
+       CASE
+           WHEN pbi.Operated = 0 AND pbi.FreeOfCharge = 1 THEN 0
+           WHEN pbi.Operated = 0 THEN pbi.ChargeOutRate * pbi.Quantity
+           ELSE NULL END                                                            'Net',
+       'Tipping'                                                                    'Item',
+       NULL                                                                         'Site Visit'
+FROM dbo.PlantBooking pb
+         LEFT OUTER JOIN dbo.PlantBookingItem pbi ON pb.RecordID = pbi.PlantBookingID
+         LEFT OUTER JOIN dbo.PlantDepot pd ON pb.PlantDepotID = pd.RecordID
+         LEFT OUTER JOIN dbo.Suppliers s ON pd.SupplierID = s.RecordID
+         LEFT OUTER JOIN dbo.CompanyStructure cs ON s.OrganisationStructureID = cs.RecordID
+WHERE pb.StatusID IN (2, 3, 4, 6, 7)
+  AND FORMAT(pb.HireStartDateTime, 'dd-MM-yyyy')   like '%{yesterday}'
+  AND pbi.Operated = 0 
+"
